@@ -10,7 +10,7 @@ function ensure_docker_running() {
   fi
 }
 
-# 2. Main Wrapper (Chat)
+# 2. Main Wrapper
 function gemini() {
   ensure_docker_running
   local GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
@@ -56,33 +56,69 @@ function gemini() {
   fi
 }
 
-# 3. AI Commit (Automator)
+# 3. AI Commit (Context-Aware Edition)
 function aic() {
   ensure_docker_running
   local GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
   if [[ -z "$GIT_ROOT" ]]; then echo "❌ Не git-репозиторий"; return 1; fi
+  
   cd "$GIT_ROOT"
   git add .
-  local DIFF_FILE="_gemini_diff_tmp.txt"
-  git diff --staged | head -c 100000 > "$DIFF_FILE"
-  if [[ ! -s "$DIFF_FILE" ]]; then echo "🤷‍♂️ Нет изменений."; rm "$DIFF_FILE"; return; fi
-  echo "🤖 Анализирую изменения (Deep Code Analysis)..." >&2
-  local PROMPT="Analyze the git diff in file @$DIFF_FILE. Task: Write a semantic git commit message (Conventional Commits). Output ONLY the raw commit message string."
+  
+  # Файл контекста
+  local CTX_FILE="_gemini_context_tmp.txt"
+  
+  # 1. Собираем историю (последние 10 коммитов)
+  echo "=== PART 1: PROJECT HISTORY (Context only) ===" > "$CTX_FILE"
+  # Формат: "хеш | автор | сообщение"
+  git log -n 10 --pretty=format:"%h | %an | %s" >> "$CTX_FILE"
+  echo -e "\n\n=== PART 2: CURRENT CHANGES (The Diff) ===" >> "$CTX_FILE"
+  
+  # 2. Собираем Diff
+  git diff --staged | head -c 100000 >> "$CTX_FILE"
+  
+  # Проверяем, есть ли изменения (Diff должен быть не пуст, а файл теперь содержит историю, так что проверяем grep-ом или размером diff)
+  # Проще проверить через git diff --quiet
+  if git diff --staged --quiet; then echo "🤷‍♂️ Нет изменений."; rm "$CTX_FILE"; return; fi
+  
+  echo "🤖 Анализирую контекст (History + Diff)..." >&2
+  
+  # ПРОМПТ
+  local PROMPT="Analyze the file @$CTX_FILE. 
+  
+  Structure of file:
+  - PART 1: Recent commit history. Use this to understand the project's style, ongoing tasks, and naming conventions.
+  - PART 2: The actual code changes (Diff) you need to describe.
+  
+  Task: Write a semantic git commit message (Conventional Commits) for the changes in PART 2.
+  
+  Guidance:
+  - If the Diff updates documentation described in History, mention that.
+  - Match the brevity or detail level of the History.
+  - Output ONLY the raw commit message."
+  
   local MSG=$(gemini "$PROMPT" | sed 's/```//g' | sed 's/"//g' | tr -d '\r')
-  rm "$DIFF_FILE"
+  rm "$CTX_FILE"
   MSG=$(echo "$MSG" | sed -e 's/^[[:space:]]*//')
-  echo -e "\n📝 \033[1;32mПредложенный коммит:\033[0m\n----------------\n$MSG\n----------------"
+
+  echo -e "\n📝 \033[1;32mПредложенный коммит:\033[0m"
+  echo "---------------------------------------------------"
+  echo "$MSG"
+  echo "---------------------------------------------------"
+  
   echo -n "🚀 Выполнить commit? [y/N]: "
   read CONFIRM
-  if [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]]; then git commit -m "$MSG"; echo "✅ Закоммичено."; else echo "❌ Отменено."; fi
+  
+  if [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]]; then
+    git commit -m "$MSG"
+    echo "✅ Закоммичено."
+  else
+    echo "❌ Отменено."
+  fi
 }
 
-# 4. Gemini Executor (Direct System Access)
-# Позволяет выполнять любые команды ВНУТРИ контейнера (git, gh, ls, python)
+# 4. Gemini Executor
 function gexec() {
-  # Используем ту же логику, но переопределяем ENTRYPOINT
-  # Это позволяет использовать настроенную среду (SSH, Auth) без ограничений AI.
-  
   local GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
   local TARGET_DIR
   if [[ -n "$GIT_ROOT" ]]; then TARGET_DIR="$GIT_ROOT"; else TARGET_DIR="$(pwd)"; fi
@@ -91,8 +127,6 @@ function gexec() {
   local GIT_CONFIG="$HOME/.gitconfig"
   local GH_CONFIG_DIR="$HOME/.docker-gemini-config/gh_config"
 
-  # Запускаем, используя переданную команду как entrypoint
-  # Пример: gexec git push -> выполнит git push внутри контейнера
   docker run -it --rm \
     --entrypoint "" \
     --network host \
