@@ -1,0 +1,8 @@
+.DS_Store
+.gemini-state/
+google_accounts.json
+settings.json
+oauth_creds.json
+client_secret.json
+gemini-cli.tar
+gh_config/
