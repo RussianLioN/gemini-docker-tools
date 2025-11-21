@@ -1,6 +1,9 @@
 #!/bin/zsh
 
-# 1. Helper
+# Запоминаем путь к скриптам
+GEMINI_TOOLS_HOME=${0:a:h}
+
+# 1. Helper: Проверка Docker
 function ensure_docker_running() {
   if ! docker info > /dev/null 2>&1; then
     echo "🐳 Docker не запущен. Запускаю..."
@@ -10,9 +13,28 @@ function ensure_docker_running() {
   fi
 }
 
-# 2. Main Wrapper
+# 2. Helper: Проверка обновлений (ВОССТАНОВЛЕНО)
+function check_gemini_update() {
+  # Проверяем пинг до Google (быстрый тест интернета)
+  if ping -c 1 -W 100 8.8.8.8 &> /dev/null; then
+    local CURRENT_VER=$(docker run --rm --entrypoint gemini gemini-cli --version 2>/dev/null)
+    # Таймаут 3 сек на запрос к NPM
+    local LATEST_VER=$(curl -m 3 -s https://registry.npmjs.org/@google/gemini-cli/latest | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
+
+    if [[ -n "$LATEST_VER" && "$CURRENT_VER" != "$LATEST_VER" ]]; then
+      echo "✨ \033[1;35mДоступно обновление Gemini CLI:\033[0m $CURRENT_VER -> $LATEST_VER"
+      echo "📦 Обновление Docker-образа..."
+      docker build --build-arg GEMINI_VERSION=$LATEST_VER -t gemini-cli "$GEMINI_TOOLS_HOME"
+      echo "✅ Обновлено! Запуск..."
+    fi
+  fi
+}
+
+# 3. Main Wrapper
 function gemini() {
   ensure_docker_running
+  check_gemini_update # Проверка обновлений перед запуском
+
   local GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
   local TARGET_DIR
   local STATE_DIR
@@ -46,16 +68,15 @@ function gemini() {
   mkdir -p "$GH_CONFIG_DIR"
   touch "$SSH_KNOWN_HOSTS"
 
-  # --- SSH CONFIG DEEP CLEAN ---
-  # Убираем: UseKeychain, AddKeysToAgent, IdentityFile, IdentitiesOnly
-  # Это заставляет Docker использовать ключи из Агента, а не искать файлы.
+  # --- SSH CONFIG SANITIZATION ---
+  # Убираем опции macOS, ломающие Linux SSH
   local SSH_CONFIG_CLEAN="$STATE_DIR/ssh_config_clean"
   if [[ -f "$SSH_CONFIG_SRC" ]]; then
     grep -vE "UseKeychain|AddKeysToAgent|IdentityFile|IdentitiesOnly" "$SSH_CONFIG_SRC" > "$SSH_CONFIG_CLEAN"
   else
     touch "$SSH_CONFIG_CLEAN"
   fi
-  # -----------------------------
+  # -------------------------------
 
   if [[ -f "$GLOBAL_AUTH" ]]; then cp "$GLOBAL_AUTH" "$STATE_DIR/google_accounts.json"; fi
   if [[ -f "$GLOBAL_SETTINGS" ]]; then cp "$GLOBAL_SETTINGS" "$STATE_DIR/settings.json"; fi
@@ -84,7 +105,7 @@ function gemini() {
   fi
 }
 
-# 3. GEXEC (Updated Clean)
+# 4. Gemini Executor
 function gexec() {
   local GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
   local TARGET_DIR
@@ -98,11 +119,11 @@ function gexec() {
   local GH_CONFIG_DIR="$HOME/.docker-gemini-config/gh_config"
   local SSH_CONFIG_SRC="$HOME/.ssh/config"
   
+  # Временная папка для gexec
   local TMP_DIR="$HOME/.docker-gemini-config/tmp_exec"
   mkdir -p "$TMP_DIR"
   local SSH_CONFIG_CLEAN="$TMP_DIR/ssh_config_clean"
   
-  # Тот же фильтр для gexec
   if [[ -f "$SSH_CONFIG_SRC" ]]; then
     grep -vE "UseKeychain|AddKeysToAgent|IdentityFile|IdentitiesOnly" "$SSH_CONFIG_SRC" > "$SSH_CONFIG_CLEAN"
   else
@@ -123,7 +144,7 @@ function gexec() {
     gemini-cli "$@"
 }
 
-# 4. AIC
+# 5. AI Commit
 function aic() {
   ensure_docker_running
   local GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
@@ -167,12 +188,6 @@ function aic() {
     if [[ "$ACTION" == "y" || "$ACTION" == "Y" ]]; then
       git commit -m "$MSG"
       echo "☁️ Auto-Push..."
-      
-      local REMOTE_URL=$(git config --get remote.origin.url)
-      if [[ "$REMOTE_URL" == https* ]]; then
-         echo "⚠️  HTTPS Remote detected. Auth may fail inside Docker."
-      fi
-      
       gexec git push
     elif [[ "$ACTION" == "c" || "$ACTION" == "C" ]]; then
       git commit -m "$MSG"
