@@ -1,9 +1,8 @@
 #!/bin/zsh
 
-# Запоминаем путь к скриптам
 GEMINI_TOOLS_HOME=${0:a:h}
 
-# 1. Helper: Проверка Docker
+# 1. Helper
 function ensure_docker_running() {
   if ! docker info > /dev/null 2>&1; then
     echo "🐳 Docker не запущен. Запускаю..."
@@ -13,19 +12,16 @@ function ensure_docker_running() {
   fi
 }
 
-# 2. Helper: Проверка обновлений (ВОССТАНОВЛЕНО)
+# 2. Helper: Update Check
 function check_gemini_update() {
-  # Проверяем пинг до Google (быстрый тест интернета)
   if ping -c 1 -W 100 8.8.8.8 &> /dev/null; then
     local CURRENT_VER=$(docker run --rm --entrypoint gemini gemini-cli --version 2>/dev/null)
-    # Таймаут 3 сек на запрос к NPM
     local LATEST_VER=$(curl -m 3 -s https://registry.npmjs.org/@google/gemini-cli/latest | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
-
     if [[ -n "$LATEST_VER" && "$CURRENT_VER" != "$LATEST_VER" ]]; then
-      echo "✨ \033[1;35mДоступно обновление Gemini CLI:\033[0m $CURRENT_VER -> $LATEST_VER"
-      echo "📦 Обновление Docker-образа..."
+      echo "✨ \033[1;35mОбновление Gemini CLI:\033[0m $CURRENT_VER -> $LATEST_VER"
+      echo "📦 Пересборка образа..."
       docker build --build-arg GEMINI_VERSION=$LATEST_VER -t gemini-cli "$GEMINI_TOOLS_HOME"
-      echo "✅ Обновлено! Запуск..."
+      echo "✅ Готово."
     fi
   fi
 }
@@ -33,7 +29,7 @@ function check_gemini_update() {
 # 3. Main Wrapper
 function gemini() {
   ensure_docker_running
-  check_gemini_update # Проверка обновлений перед запуском
+  check_gemini_update
 
   local GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
   local TARGET_DIR
@@ -68,19 +64,17 @@ function gemini() {
   mkdir -p "$GH_CONFIG_DIR"
   touch "$SSH_KNOWN_HOSTS"
 
-  # --- SSH CONFIG SANITIZATION ---
-  # Убираем опции macOS, ломающие Linux SSH
   local SSH_CONFIG_CLEAN="$STATE_DIR/ssh_config_clean"
   if [[ -f "$SSH_CONFIG_SRC" ]]; then
     grep -vE "UseKeychain|AddKeysToAgent|IdentityFile|IdentitiesOnly" "$SSH_CONFIG_SRC" > "$SSH_CONFIG_CLEAN"
   else
     touch "$SSH_CONFIG_CLEAN"
   fi
-  # -------------------------------
 
   if [[ -f "$GLOBAL_AUTH" ]]; then cp "$GLOBAL_AUTH" "$STATE_DIR/google_accounts.json"; fi
   if [[ -f "$GLOBAL_SETTINGS" ]]; then cp "$GLOBAL_SETTINGS" "$STATE_DIR/settings.json"; fi
 
+  # УБРАН ЛИШНИЙ МАУНТ /tmp_exchange
   docker run $DOCKER_FLAGS --rm \
     --network host \
     -e GOOGLE_CLOUD_PROJECT=gemini-cli-auth-478707 \
@@ -95,9 +89,8 @@ function gemini() {
     -v "${STATE_DIR}":/root/.gemini \
     gemini-cli "$@"
 
-  if [[ -f "$STATE_DIR/google_accounts.json" ]]; then
-    cp "$STATE_DIR/google_accounts.json" "$GLOBAL_AUTH"
-  fi
+  if [[ -f "$STATE_DIR/google_accounts.json" ]]; then cp "$STATE_DIR/google_accounts.json" "$GLOBAL_AUTH"; fi
+  if [[ -f "$STATE_DIR/settings.json" ]]; then cp "$STATE_DIR/settings.json" "$GLOBAL_SETTINGS"; fi
 
   if [[ "$IS_INTERACTIVE" == "true" && -n "$GIT_ROOT" ]]; then
     echo -e "\n👋 Сеанс завершен."
@@ -105,7 +98,7 @@ function gemini() {
   fi
 }
 
-# 4. Gemini Executor
+# 4. GEXEC
 function gexec() {
   local GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
   local TARGET_DIR
@@ -118,8 +111,6 @@ function gexec() {
   local GIT_CONFIG="$HOME/.gitconfig"
   local GH_CONFIG_DIR="$HOME/.docker-gemini-config/gh_config"
   local SSH_CONFIG_SRC="$HOME/.ssh/config"
-  
-  # Временная папка для gexec
   local TMP_DIR="$HOME/.docker-gemini-config/tmp_exec"
   mkdir -p "$TMP_DIR"
   local SSH_CONFIG_CLEAN="$TMP_DIR/ssh_config_clean"
@@ -144,7 +135,7 @@ function gexec() {
     gemini-cli "$@"
 }
 
-# 5. AI Commit
+# 5. AIC (Memory-Based, No Files)
 function aic() {
   ensure_docker_running
   local GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
@@ -162,17 +153,31 @@ function aic() {
   git add .
   
   if ! git diff --staged --quiet; then
-    local CTX_FILE="_gemini_context_tmp.txt"
-    echo "=== PART 1: PROJECT HISTORY ===" > "$CTX_FILE"
-    git log -n 10 --pretty=format:"%h | %an | %s" >> "$CTX_FILE"
-    echo -e "\n\n=== PART 2: CURRENT DIFF ===" >> "$CTX_FILE"
-    git diff --staged | head -c 100000 >> "$CTX_FILE"
+    
+    # --- DIRECT MEMORY CONTEXT ---
+    # Читаем данные прямо в переменные (без создания файлов)
+    local LOG_CONTENT=$(git log -n 10 --pretty=format:"%h | %an | %s")
+    # Ограничиваем размер diff до ~90KB, чтобы влезло в аргумент командной строки
+    local DIFF_CONTENT=$(git diff --staged | head -c 90000)
     
     echo "🤖 Анализирую изменения..." >&2
-    local PROMPT="Analyze file @$CTX_FILE. Part 1 is history, Part 2 is changes. Write a semantic Conventional Commit message. Match the style of History. Output ONLY raw text."
     
+    # Формируем единый промпт-строку
+    local PROMPT="Act as a Senior DevOps Engineer.
+    
+    CONTEXT PART 1 (Project History):
+    $LOG_CONTENT
+    
+    CONTEXT PART 2 (Current Changes):
+    $DIFF_CONTENT
+    
+    TASK:
+    Write a semantic Conventional Commit message for the changes in PART 2.
+    Match the style of PART 1.
+    Output ONLY the raw commit message string. No markdown, no quotes."
+    
+    # Передаем промпт как аргумент. Zsh справится с переносами строк.
     local MSG=$(gemini "$PROMPT" | sed 's/```//g' | sed 's/"//g' | tr -d '\r')
-    rm "$CTX_FILE"
     MSG=$(echo "$MSG" | sed -e 's/^[[:space:]]*//')
 
     echo -e "\n📝 \033[1;32mПредложенный коммит:\033[0m"
@@ -188,6 +193,12 @@ function aic() {
     if [[ "$ACTION" == "y" || "$ACTION" == "Y" ]]; then
       git commit -m "$MSG"
       echo "☁️ Auto-Push..."
+      
+      local REMOTE_URL=$(git config --get remote.origin.url)
+      if [[ "$REMOTE_URL" == https* ]]; then
+         echo "⚠️  HTTPS Remote detected. Auth may fail inside Docker."
+      fi
+      
       gexec git push
     elif [[ "$ACTION" == "c" || "$ACTION" == "C" ]]; then
       git commit -m "$MSG"
@@ -205,11 +216,6 @@ function aic() {
     echo -n "🚀 Выполнить git push сейчас? [Y/n]: "
     read PUSH_CONFIRM
     PUSH_CONFIRM=${PUSH_CONFIRM:-y}
-    if [[ "$PUSH_CONFIRM" == "y" || "$PUSH_CONFIRM" == "Y" ]]; then 
-       echo "☁️ Pushing..."
-       gexec git push
-    else 
-       echo "🏠 Оставлено локально."
-    fi
+    if [[ "$PUSH_CONFIRM" == "y" || "$PUSH_CONFIRM" == "Y" ]]; then echo "☁️ Pushing..."; gexec git push; else echo "🏠 Оставлено локально."; fi
   fi
 }
