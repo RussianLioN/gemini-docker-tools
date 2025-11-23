@@ -2,7 +2,8 @@
 
 GEMINI_TOOLS_HOME=${0:a:h}
 
-# 1. Helper
+# --- 1. SYSTEM CHECKS ---
+
 function ensure_docker_running() {
   if ! docker info > /dev/null 2>&1; then
     echo "🐳 Docker не запущен. Запускаю..."
@@ -12,8 +13,26 @@ function ensure_docker_running() {
   fi
 }
 
-# 2. Helper: Update Check
+function ensure_ssh_loaded() {
+  # Проверяем, есть ли ключи в агенте
+  ssh-add -l > /dev/null 2>&1
+  if [ $? -ne 0 ]; then
+    # Если пусто - пробуем восстановить из Keychain (macOS specific)
+    ssh-add --apple-load-keychain > /dev/null 2>&1
+    
+    # Проверяем снова
+    ssh-add -l > /dev/null 2>&1
+    if [ $? -eq 0 ]; then
+      echo "🔑 SSH ключи восстановлены из Keychain."
+    else
+      echo "⚠️  Внимание: SSH-агент пуст. Git внутри контейнера может не работать."
+      echo "   Выполните 'ssh-add --apple-use-keychain ~/.ssh/id_ed25519' один раз."
+    fi
+  fi
+}
+
 function check_gemini_update() {
+  # Проверяем пинг до Google (быстрый тест интернета)
   if ping -c 1 -W 100 8.8.8.8 &> /dev/null; then
     local CURRENT_VER=$(docker run --rm --entrypoint gemini gemini-cli --version 2>/dev/null)
     local LATEST_VER=$(curl -m 3 -s https://registry.npmjs.org/@google/gemini-cli/latest | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
@@ -26,9 +45,11 @@ function check_gemini_update() {
   fi
 }
 
-# 3. Main Wrapper
+# --- 2. MAIN WRAPPER ---
+
 function gemini() {
   ensure_docker_running
+  ensure_ssh_loaded
   check_gemini_update
 
   local GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
@@ -64,6 +85,7 @@ function gemini() {
   mkdir -p "$GH_CONFIG_DIR"
   touch "$SSH_KNOWN_HOSTS"
 
+  # SSH Sanitization
   local SSH_CONFIG_CLEAN="$STATE_DIR/ssh_config_clean"
   if [[ -f "$SSH_CONFIG_SRC" ]]; then
     grep -vE "UseKeychain|AddKeysToAgent|IdentityFile|IdentitiesOnly" "$SSH_CONFIG_SRC" > "$SSH_CONFIG_CLEAN"
@@ -71,10 +93,10 @@ function gemini() {
     touch "$SSH_CONFIG_CLEAN"
   fi
 
+  # Sync In
   if [[ -f "$GLOBAL_AUTH" ]]; then cp "$GLOBAL_AUTH" "$STATE_DIR/google_accounts.json"; fi
   if [[ -f "$GLOBAL_SETTINGS" ]]; then cp "$GLOBAL_SETTINGS" "$STATE_DIR/settings.json"; fi
 
-  # УБРАН ЛИШНИЙ МАУНТ /tmp_exchange
   docker run $DOCKER_FLAGS --rm \
     --network host \
     -e GOOGLE_CLOUD_PROJECT=gemini-cli-auth-478707 \
@@ -89,6 +111,7 @@ function gemini() {
     -v "${STATE_DIR}":/root/.gemini \
     gemini-cli "$@"
 
+  # Sync Out
   if [[ -f "$STATE_DIR/google_accounts.json" ]]; then cp "$STATE_DIR/google_accounts.json" "$GLOBAL_AUTH"; fi
   if [[ -f "$STATE_DIR/settings.json" ]]; then cp "$STATE_DIR/settings.json" "$GLOBAL_SETTINGS"; fi
 
@@ -98,8 +121,12 @@ function gemini() {
   fi
 }
 
-# 4. GEXEC
+# --- 3. GEXEC ---
+
 function gexec() {
+  ensure_docker_running
+  ensure_ssh_loaded
+
   local GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
   local TARGET_DIR
   if [[ -n "$GIT_ROOT" ]]; then TARGET_DIR="$GIT_ROOT"; else TARGET_DIR="$(pwd)"; fi
@@ -135,9 +162,12 @@ function gexec() {
     gemini-cli "$@"
 }
 
-# 5. AIC (Memory-Based, No Files)
+# --- 4. AIC ---
+
 function aic() {
   ensure_docker_running
+  ensure_ssh_loaded
+
   local GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
   if [[ -z "$GIT_ROOT" ]]; then echo "❌ Не git-репозиторий"; return 1; fi
   
@@ -153,16 +183,11 @@ function aic() {
   git add .
   
   if ! git diff --staged --quiet; then
-    
-    # --- DIRECT MEMORY CONTEXT ---
-    # Читаем данные прямо в переменные (без создания файлов)
     local LOG_CONTENT=$(git log -n 10 --pretty=format:"%h | %an | %s")
-    # Ограничиваем размер diff до ~90KB, чтобы влезло в аргумент командной строки
-    local DIFF_CONTENT=$(git diff --staged | head -c 90000)
+    local DIFF_CONTENT=$(git diff --staged | head -c 100000)
     
     echo "🤖 Анализирую изменения..." >&2
     
-    # Формируем единый промпт-строку
     local PROMPT="Act as a Senior DevOps Engineer.
     
     CONTEXT PART 1 (Project History):
@@ -176,7 +201,6 @@ function aic() {
     Match the style of PART 1.
     Output ONLY the raw commit message string. No markdown, no quotes."
     
-    # Передаем промпт как аргумент. Zsh справится с переносами строк.
     local MSG=$(gemini "$PROMPT" | sed 's/```//g' | sed 's/"//g' | tr -d '\r')
     MSG=$(echo "$MSG" | sed -e 's/^[[:space:]]*//')
 
