@@ -6,41 +6,37 @@ GEMINI_TOOLS_HOME=${0:a:h}
 
 function ensure_docker_running() {
   if ! docker info > /dev/null 2>&1; then
-    echo "🐳 Docker не запущен. Запускаю..."
+    echo "🐳 Docker не запущен. Запускаю..." >&2
     open -a Docker
     while ! docker info > /dev/null 2>&1; do sleep 1; done
-    echo "✅ Docker готов!"
+    echo "✅ Docker готов!" >&2
   fi
 }
 
 function ensure_ssh_loaded() {
   # Проверяем, есть ли ключи в агенте
-  ssh-add -l > /dev/null 2>&1
-  if [ $? -ne 0 ]; then
-    # Если пусто - пробуем восстановить из Keychain (macOS specific)
+  if ! ssh-add -l > /dev/null 2>&1; then
+    # Если пусто - пробуем восстановить из Keychain
     ssh-add --apple-load-keychain > /dev/null 2>&1
     
-    # Проверяем снова
-    ssh-add -l > /dev/null 2>&1
-    if [ $? -eq 0 ]; then
-      echo "🔑 SSH ключи восстановлены из Keychain."
-    else
-      echo "⚠️  Внимание: SSH-агент пуст. Git внутри контейнера может не работать."
-      echo "   Выполните 'ssh-add --apple-use-keychain ~/.ssh/id_ed25519' один раз."
+    # Если все еще пусто
+    if ! ssh-add -l > /dev/null 2>&1; then
+       echo "⚠️  Внимание: SSH-агент пуст. Git внутри контейнера может не работать." >&2
     fi
   fi
 }
 
 function check_gemini_update() {
-  # Проверяем пинг до Google (быстрый тест интернета)
+  # Проверяем пинг (быстрый тест)
   if ping -c 1 -W 100 8.8.8.8 &> /dev/null; then
     local CURRENT_VER=$(docker run --rm --entrypoint gemini gemini-cli --version 2>/dev/null)
     local LATEST_VER=$(curl -m 3 -s https://registry.npmjs.org/@google/gemini-cli/latest | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
+    
     if [[ -n "$LATEST_VER" && "$CURRENT_VER" != "$LATEST_VER" ]]; then
-      echo "✨ \033[1;35mОбновление Gemini CLI:\033[0m $CURRENT_VER -> $LATEST_VER"
-      echo "📦 Пересборка образа..."
-      docker build --build-arg GEMINI_VERSION=$LATEST_VER -t gemini-cli "$GEMINI_TOOLS_HOME"
-      echo "✅ Готово."
+      echo "✨ \033[1;35mДоступно обновление Gemini CLI:\033[0m $CURRENT_VER -> $LATEST_VER" >&2
+      echo "📦 Пересборка образа..." >&2
+      docker build --build-arg GEMINI_VERSION=$LATEST_VER -t gemini-cli "$GEMINI_TOOLS_HOME" >&2
+      echo "✅ Готово." >&2
     fi
   fi
 }
@@ -50,8 +46,7 @@ function check_gemini_update() {
 function gemini() {
   ensure_docker_running
   ensure_ssh_loaded
-  check_gemini_update
-
+  
   local GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
   local TARGET_DIR
   local STATE_DIR
@@ -68,6 +63,11 @@ function gemini() {
   if [ -t 1 ] && [ -z "$1" ]; then 
     DOCKER_FLAGS="-it"
     IS_INTERACTIVE=true
+  fi
+
+  # ИСПРАВЛЕНИЕ: Проверка обновлений ТОЛЬКО в интерактивном режиме
+  if [[ "$IS_INTERACTIVE" == "true" ]]; then
+    check_gemini_update
   fi
 
   if [[ -n "$GIT_ROOT" ]]; then
@@ -93,7 +93,6 @@ function gemini() {
     touch "$SSH_CONFIG_CLEAN"
   fi
 
-  # Sync In
   if [[ -f "$GLOBAL_AUTH" ]]; then cp "$GLOBAL_AUTH" "$STATE_DIR/google_accounts.json"; fi
   if [[ -f "$GLOBAL_SETTINGS" ]]; then cp "$GLOBAL_SETTINGS" "$STATE_DIR/settings.json"; fi
 
@@ -111,7 +110,6 @@ function gemini() {
     -v "${STATE_DIR}":/root/.gemini \
     gemini-cli "$@"
 
-  # Sync Out
   if [[ -f "$STATE_DIR/google_accounts.json" ]]; then cp "$STATE_DIR/google_accounts.json" "$GLOBAL_AUTH"; fi
   if [[ -f "$STATE_DIR/settings.json" ]]; then cp "$STATE_DIR/settings.json" "$GLOBAL_SETTINGS"; fi
 
@@ -220,7 +218,7 @@ function aic() {
       
       local REMOTE_URL=$(git config --get remote.origin.url)
       if [[ "$REMOTE_URL" == https* ]]; then
-         echo "⚠️  HTTPS Remote detected. Auth may fail inside Docker."
+         echo "⚠️  HTTPS Remote detected. Auth may fail inside Docker." >&2
       fi
       
       gexec git push
