@@ -1,0 +1,204 @@
+version: '3.8'
+
+# Multi-Session AI IDE Orchestrator
+# Поддерживает до 5 GLM сессий + неограниченное Gemini/Claude
+# Enterprise-grade orchestration с resource limits и health monitoring
+
+services:
+  # Session Manager Service
+  session-manager:
+    image: session-manager:latest
+    container_name: ai-session-manager
+    build:
+      context: ../session-manager
+      dockerfile: Dockerfile
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp/ai-sessions:/tmp/ai-sessions
+    environment:
+      - SESSION_REGISTRY_DIR=/tmp/ai-sessions
+      - MAX_CONCURRENT_SESSIONS=10
+      - GLM_MAX_SESSIONS=5
+    networks:
+      - ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "session-manager", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Gemini IDE Template
+  gemini-template:
+    image: gemini-ide:latest
+    build:
+      context: ../containers/gemini-ide
+      dockerfile: Dockerfile
+    volumes:
+      - ${PROJECT_ROOT:-/tmp}:/workspace
+      - ~/.ssh:/root/.ssh:ro
+      - ~/.config/gcloud:/root/.config/gcloud:ro
+    environment:
+      - AI_PROVIDER=gemini
+      - PROJECT_ROOT=/workspace
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
+      - GOOGLE_APPLICATION_CREDENTIALS=/root/.config/gcloud/application_default_credentials.json
+    networks:
+      - ai-network
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.25'
+    profiles:
+      - templates
+    healthcheck:
+      test: ["CMD", "gemini", "--version"]
+      interval: 60s
+      timeout: 10s
+      retries: 2
+
+  # Claude IDE Template
+  claude-template:
+    image: claude-ide:latest
+    build:
+      context: ../containers/claude-ide
+      dockerfile: Dockerfile
+    volumes:
+      - ${PROJECT_ROOT:-/tmp}:/workspace
+      - ~/.ssh:/root/.ssh:ro
+      - ~/.claude:/root/.claude
+    environment:
+      - AI_PROVIDER=claude
+      - PROJECT_ROOT=/workspace
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    networks:
+      - ai-network
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.25'
+    profiles:
+      - templates
+    healthcheck:
+      test: ["CMD", "claude", "--version"]
+      interval: 60s
+      timeout: 10s
+      retries: 2
+
+  # GLM-4.6 IDE Template
+  glm-template:
+    image: glm-ide:latest
+    build:
+      context: ../containers/glm-ide
+      dockerfile: Dockerfile
+    volumes:
+      - ${PROJECT_ROOT:-/tmp}:/workspace
+      - ~/.ssh:/root/.ssh:ro
+      - ~/.claude:/root/.claude
+    environment:
+      - AI_PROVIDER=glm
+      - PROJECT_ROOT=/workspace
+      - ZAI_API_KEY=${ZAI_API_KEY}
+      - GLM_MODEL=glm-4.6
+      - MAX_CONCURRENT_SESSIONS=5
+    networks:
+      - ai-network
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+          cpus: '1.5'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+    profiles:
+      - templates
+    healthcheck:
+      test: ["CMD", "claude", "--version"]
+      interval: 60s
+      timeout: 10s
+      retries: 2
+
+  # Dynamic Session Services (которые будут создаваться runtime)
+  # Эти сервисы запускаются динамически через session-manager
+
+networks:
+  ai-network:
+    driver: bridge
+    name: ai-network
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  ai-sessions:
+    driver: local
+    name: ai-sessions
+
+# Конфигурация для логирования
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# Применение logging ко всем сервисам
+x-service-logging: &service-logging
+  logging: *default-logging
+
+# Resource profiles для разных сценариев использования
+x-resource-profiles:
+  # Lightweight profile для простых задач
+  lightweight: &lightweight
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.1'
+
+  # Standard profile для обычных задач
+  standard: &standard
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.25'
+
+  # Heavyweight profile для resource-intensive задач
+  heavyweight: &heavyweight
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+
+# Environment variable defaults
+x-environment: &default-env
+  - TZ=UTC
+  - LANG=C.UTF-8
+  - LC_ALL=C.UTF-8
+  - TERM=xterm-256color
+
+# Volume defaults
+x-volumes: &default-volumes
+  - ${PROJECT_ROOT:-/tmp}:/workspace
+  - ~/.ssh:/root/.ssh:ro
+  - /tmp/ai-sessions:/tmp/ai-sessions

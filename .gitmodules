@@ -1,0 +1,3 @@
+[submodule "claude-code-docker-tools"]
+	path = claude-code-docker-tools
+	url = https://github.com/RussianLioN/claude-code-docker-tools.git
